@@ -16,6 +16,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 from pydantic import validate_call
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from postgres_mcp.index.dta_calc import DatabaseTuningAdvisor
 
@@ -413,7 +415,7 @@ If there is no hypothetical index, you can pass an empty list.""",
 
 # Query function declaration without the decorator - we'll add it dynamically based on access mode
 async def execute_sql(
-    sql: str = Field(description="SQL to run", default="all"),
+    sql: str = Field(description="SQL to run"),
 ) -> ResponseType:
     """Executes a SQL query against the database."""
     try:
@@ -554,6 +556,38 @@ async def get_top_queries(
         return format_error_response(str(e))
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request: Request) -> JSONResponse:
+    """Health check endpoint — verifica el estado del servidor y la conexión a la base de datos."""
+    db_status = "connected"
+    db_error = None
+
+    try:
+        if not db_connection.is_valid:
+            db_status = "disconnected"
+            db_error = db_connection.last_error or "Connection pool is not initialized"
+        else:
+            # Verifica que la conexión siga activa con una query liviana
+            pool = await db_connection.pool_connect()
+            async with pool.connection() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT 1")
+    except Exception as e:
+        db_status = "disconnected"
+        db_error = obfuscate_password(str(e))
+
+    status_code = 200 if db_status == "connected" else 503
+    payload: dict = {
+        "status": "ok" if db_status == "connected" else "degraded",
+        "database": db_status,
+        "access_mode": current_access_mode.value,
+    }
+    if db_error:
+        payload["error"] = db_error
+
+    return JSONResponse(payload, status_code=status_code)
+
+
 async def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="PostgreSQL MCP Server")
@@ -596,6 +630,13 @@ async def main():
         default=8000,
         help="Port for streamable HTTP server (default: 8000)",
     )
+    parser.add_argument(
+        "--tool-prefix",
+        type=str,
+        default="",
+        help="Prefix to add to all tool names (e.g. 'cgma' produces 'cgma_list_schemas'). "
+             "Useful when connecting multiple MCP instances to the same AI agent.",
+    )
 
     args = parser.parse_args()
 
@@ -603,10 +644,24 @@ async def main():
     global current_access_mode
     current_access_mode = AccessMode(args.access_mode)
 
+    # Aplicar prefijo a todas las tools si se especificó --tool-prefix
+    tool_prefix = args.tool_prefix.strip()
+    if tool_prefix:
+        # Renombrar todas las tools registradas hasta ahora con el prefijo
+        existing_tools = list(mcp._tool_manager._tools.keys())
+        for tool_name in existing_tools:
+            tool = mcp._tool_manager._tools.pop(tool_name)
+            new_name = f"{tool_prefix}_{tool_name}"
+            tool.name = new_name
+            mcp._tool_manager._tools[new_name] = tool
+            logger.info(f"Tool renombrada: {tool_name} → {new_name}")
+
     # Add the query tool with a description and annotations appropriate to the access mode
+    execute_sql_name = f"{tool_prefix}_execute_sql" if tool_prefix else "execute_sql"
     if current_access_mode == AccessMode.UNRESTRICTED:
         mcp.add_tool(
             execute_sql,
+            name=execute_sql_name,
             description="Execute any SQL query",
             annotations=ToolAnnotations(
                 title="Execute SQL",
@@ -616,6 +671,7 @@ async def main():
     else:
         mcp.add_tool(
             execute_sql,
+            name=execute_sql_name,
             description="Execute a read-only SQL query",
             annotations=ToolAnnotations(
                 title="Execute SQL (Read-Only)",
@@ -666,6 +722,8 @@ async def main():
     elif args.transport == "streamable-http":
         mcp.settings.host = args.streamable_http_host
         mcp.settings.port = args.streamable_http_port
+        # Desactivar protección DNS rebinding para permitir acceso remoto desde N8N y otros clientes externos
+        mcp.settings.transport_security = None
         await mcp.run_streamable_http_async()
 
 

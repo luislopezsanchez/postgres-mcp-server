@@ -1,0 +1,29 @@
+version: "3.8"
+
+# ============================================================
+#  Para usar: copia .env.example como .env y rellena tus datos
+#  Luego ejecuta:  docker-compose up -d --build
+# ============================================================
+
+services:
+  postgres-mcp:
+    build: .
+    container_name: postgres-mcp
+    restart: unless-stopped
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    environment:
+      DATABASE_URI: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}"
+    command:
+      - "--transport=sse"
+      - "--access-mode=${ACCESS_MODE:-restricted}"
+    healthcheck:
+      test:
+        [
+          "CMD", "python", "-c",
+          "import urllib.request, sys; r = urllib.request.urlopen('http://localhost:8000/health', timeout=5); sys.exit(0 if r.status == 200 else 1)"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

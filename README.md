@@ -1,3 +1,5 @@
+docker-compose up -d --build
+
 <div align="center">
 
 <img src="assets/postgres-mcp-pro.png" alt="Postgres MCP Pro Logo" width="600"/>
@@ -12,6 +14,8 @@
 
 <div class="toc">
   <a href="#overview">Overview</a> •
+  <a href="#despliegue-con-docker-compose">Despliegue con Docker Compose</a> •
+  <a href="#conexión-a-múltiples-bases-de-datos">Múltiples Bases de Datos</a> •
   <a href="#demo">Demo</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#technical-notes">Technical Notes</a> •
@@ -36,9 +40,279 @@ Features include:
 - **🧠 Schema Intelligence** - context-aware SQL generation based on detailed understanding of the database schema.
 - **🛡️ Safe SQL Execution** - configurable access control, including support for read-only mode and safe SQL parsing, making it usable for both development and production.
 
-Postgres MCP Pro supports both the [Standard Input/Output (stdio)](https://modelcontextprotocol.io/docs/concepts/transports#standard-input%2Foutput-stdio) and [Server-Sent Events (SSE)](https://modelcontextprotocol.io/docs/concepts/transports#server-sent-events-sse) transports, for flexibility in different environments.
+Postgres MCP Pro supports the [Standard Input/Output (stdio)](https://modelcontextprotocol.io/docs/concepts/transports#standard-input%2Foutput-stdio), [Server-Sent Events (SSE)](https://modelcontextprotocol.io/docs/concepts/transports#server-sent-events-sse), and Streamable HTTP transports, for flexibility in different environments.
 
 For additional background on why we built Postgres MCP Pro, see [our launch blog post](https://www.crystaldba.ai/blog/post/announcing-postgres-mcp-server-pro).
+
+---
+
+## Despliegue con Docker Compose
+
+Esta sección explica cómo levantar el servidor MCP como un contenedor Docker y conectarlo desde **Claude Desktop** y **N8N**. Es la forma recomendada de usarlo en producción o en un servidor dedicado.
+
+### ¿Qué necesitas antes de empezar?
+
+- Docker y Docker Compose instalados en el servidor donde correrá el MCP.
+- IP o hostname del servidor PostgreSQL al que se conectará.
+- Nombre de la base de datos, usuario y contraseña de PostgreSQL.
+- Que el servidor MCP pueda alcanzar al servidor PostgreSQL por red (mismo servidor, misma red local o IP pública).
+
+### Arquitectura del despliegue
+
+```
+┌─────────────────────┐              ┌──────────────────────────┐
+│   Claude Desktop    │              │   Servidor con Docker    │
+│   (tu PC)           │──────────▶   │                          │
+└─────────────────────┘   SSE/HTTP   │   ┌──────────────────┐   │
+                                     │   │  postgres-mcp    │   │
+┌─────────────────────┐              │   │  (contenedor)    │   │
+│   N8N               │──────────▶   │   │  puerto 8000     │   │
+│   (MCP Client node) │   SSE/HTTP   │   └────────┬─────────┘   │
+└─────────────────────┘              └────────────┼─────────────┘
+                                                  │ psycopg3
+                                                  ▼
+                                     ┌────────────────────────┐
+                                     │   Servidor PostgreSQL  │
+                                     └────────────────────────┘
+```
+
+Ambos clientes (Claude Desktop y N8N) se conectan al **mismo contenedor** usando el protocolo SSE sobre HTTP. Solo necesitas desplegar el contenedor una vez.
+
+### Paso 1 — Crear el archivo `.env`
+
+En la raíz del proyecto encontrarás el archivo `.env.example`. Cópialo como `.env` y rellena tus datos:
+
+```bash
+cp .env.example .env
+```
+
+Contenido de `.env` con tus valores reales:
+
+```env
+POSTGRES_HOST=192.168.1.100        # IP o hostname del servidor PostgreSQL
+POSTGRES_PORT=5432                 # Puerto PostgreSQL (5432 por defecto)
+POSTGRES_DB=nombre_base_de_datos   # Nombre de la base de datos
+POSTGRES_USER=usuario              # Usuario de PostgreSQL
+POSTGRES_PASSWORD=contraseña       # Contraseña del usuario
+
+ACCESS_MODE=restricted             # restricted = solo lectura (recomendado para producción)
+                                   # unrestricted = lectura y escritura (para desarrollo)
+MCP_PORT=8000                      # Puerto donde quedará disponible el MCP
+```
+
+> **Nota de seguridad:** El archivo `.env` ya está incluido en el `.gitignore` del proyecto, por lo que tus credenciales nunca se subirán accidentalmente a un repositorio Git.
+
+### Paso 2 — Levantar el contenedor
+
+Desde la raíz del proyecto ejecuta:
+
+```bash
+docker-compose up -d --build
+```
+
+- `--build` construye la imagen desde el código local (necesario la primera vez o cuando hagas cambios al código).
+- `-d` ejecuta el contenedor en segundo plano.
+
+Para ver los logs en tiempo real:
+
+```bash
+docker-compose logs -f
+```
+
+### Paso 3 — Verificar que el servidor está funcionando
+
+El servidor expone un endpoint `/health` que puedes consultar para verificar el estado del servidor y la conexión a la base de datos:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Respuesta cuando todo está bien (HTTP 200):
+
+```json
+{
+  "status": "ok",
+  "database": "connected",
+  "access_mode": "restricted"
+}
+```
+
+Respuesta si hay un problema de conexión a la base de datos (HTTP 503):
+
+```json
+{
+  "status": "degraded",
+  "database": "disconnected",
+  "access_mode": "restricted",
+  "error": "descripción del error"
+}
+```
+
+Si el servidor no responde, revisa los logs con `docker-compose logs -f`.
+
+### Paso 4 — Conectar Claude Desktop
+
+Edita el archivo de configuración de Claude Desktop:
+
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+Añade la siguiente configuración dentro de `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "postgres": {
+      "type": "sse",
+      "url": "http://IP-DEL-SERVIDOR:8000/sse"
+    }
+  }
+}
+```
+
+Reemplaza `IP-DEL-SERVIDOR` con la IP real del servidor donde corre el contenedor. Si el contenedor está en tu misma máquina, puedes usar `localhost`.
+
+Reinicia Claude Desktop para que tome los cambios. Las herramientas del MCP aparecerán disponibles automáticamente en el chat.
+
+### Paso 5 — Conectar N8N
+
+En N8N usa el nodo **MCP Client** (`@n8n/n8n-nodes-langchain.mcpClientTool`).
+
+En las credenciales del nodo configura:
+
+```
+SSE Endpoint: http://IP-DEL-SERVIDOR:8000/sse
+```
+
+El nodo descubrirá automáticamente todas las herramientas disponibles del servidor MCP.
+
+### Comandos útiles de administración
+
+```bash
+# Iniciar el contenedor
+docker-compose up -d --build
+
+# Detener el contenedor
+docker-compose down
+
+# Ver logs en tiempo real
+docker-compose logs -f
+
+# Reiniciar el contenedor (por ejemplo, tras cambiar el .env)
+docker-compose restart
+
+# Ver el estado del contenedor y su healthcheck
+docker-compose ps
+```
+
+### Modos de acceso
+
+El parámetro `ACCESS_MODE` en el `.env` controla qué operaciones puede hacer el agente IA sobre la base de datos:
+
+| Modo | Descripción | Cuándo usarlo |
+|------|-------------|---------------|
+| `restricted` | Solo lectura. Consultas SELECT únicamente, con límite de tiempo de ejecución. | ✅ Producción |
+| `unrestricted` | Lectura y escritura. Puede ejecutar cualquier SQL incluyendo INSERT, UPDATE, DELETE. | Desarrollo |
+
+---
+
+## Conexión a Múltiples Bases de Datos
+
+Si necesitas que el MCP tenga acceso a más de una base de datos, la forma más sencilla y sin necesidad de modificar el código es levantar **un contenedor independiente por cada base de datos**, cada uno escuchando en un puerto diferente del servidor.
+
+### Arquitectura
+
+```
+┌─────────────────────┐     puerto 8001     ┌─────────────────────┐
+│   Claude Desktop    │────────────────────▶│  mcp-clientes       │──▶ BD clientes
+│   N8N               │     puerto 8002     ├─────────────────────┤
+│                     │────────────────────▶│  mcp-inventario     │──▶ BD inventario
+│                     │     puerto 8003     ├─────────────────────┤
+│                     │────────────────────▶│  mcp-facturacion    │──▶ BD facturacion
+└─────────────────────┘                     └─────────────────────┘
+```
+
+Todos los contenedores se construyen desde la misma imagen. Solo cambia la `DATABASE_URI` y el puerto expuesto en cada uno.
+
+### Archivo de configuración
+
+El proyecto incluye el archivo `docker-compose.multi-db.yml` como ejemplo listo para adaptar. Cada servicio dentro del archivo sigue esta estructura:
+
+```yaml
+mcp-clientes:
+  build: .
+  container_name: mcp-clientes
+  restart: unless-stopped
+  ports:
+    - "8001:8000"                          # puerto externo : puerto interno (siempre 8000)
+  environment:
+    DATABASE_URI: "postgresql://usuario:contraseña@192.168.1.100:5432/clientes"
+  command:
+    - "--transport=sse"
+    - "--access-mode=restricted"           # restricted = solo lectura
+```
+
+Para añadir más bases de datos, copia el bloque y cambia el nombre del servicio, el puerto externo, la `DATABASE_URI` y el `access-mode` según necesites.
+
+### Levantar todos los contenedores
+
+```bash
+docker-compose -f docker-compose.multi-db.yml up -d --build
+```
+
+### Verificar que cada instancia está activa
+
+```bash
+curl http://localhost:8001/health    # BD clientes
+curl http://localhost:8002/health    # BD inventario
+curl http://localhost:8003/health    # BD facturacion
+```
+
+### Conectar Claude Desktop a múltiples BDs
+
+Añade una entrada en `mcpServers` por cada base de datos:
+
+```json
+{
+  "mcpServers": {
+    "bd-clientes": {
+      "type": "sse",
+      "url": "http://IP-SERVIDOR:8001/sse"
+    },
+    "bd-inventario": {
+      "type": "sse",
+      "url": "http://IP-SERVIDOR:8002/sse"
+    },
+    "bd-facturacion": {
+      "type": "sse",
+      "url": "http://IP-SERVIDOR:8003/sse"
+    }
+  }
+}
+```
+
+Claude verá las 9 herramientas de cada base de datos de forma independiente y sabrá a cuál dirigirse según el contexto de la conversación.
+
+### Conectar N8N a múltiples BDs
+
+Registra una credencial de tipo **MCP Client** por cada base de datos y asígnale un nombre descriptivo:
+
+| Credencial | SSE Endpoint |
+|---|---|
+| `bd-clientes` | `http://IP-SERVIDOR:8001/sse` |
+| `bd-inventario` | `http://IP-SERVIDOR:8002/sse` |
+| `bd-facturacion` | `http://IP-SERVIDOR:8003/sse` |
+
+En cada workflow usas el nodo **MCP Client** con la credencial que corresponde a la base de datos que necesitas consultar.
+
+### Notas importantes
+
+- El puerto **interno** del contenedor siempre es `8000`. Solo el puerto **externo** (el de la izquierda en `ports`) cambia entre servicios.
+- Cada contenedor tiene su propio healthcheck independiente.
+- Puedes mezclar modos de acceso: algunas BDs en `restricted` (solo lectura) y otras en `unrestricted` (lectura y escritura) según lo que necesite cada caso.
+- Si tu servidor PostgreSQL está en la misma máquina que los contenedores, usa `host.docker.internal` (Mac/Windows) o `172.17.0.1` (Linux) en lugar de `localhost` dentro de la `DATABASE_URI`.
+
+---
 
 ## Demo
 

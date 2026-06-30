@@ -1,0 +1,96 @@
+version: "3.8"
+
+# ============================================================
+#  EJEMPLO: Múltiples bases de datos con un contenedor por BD
+#
+#  Para usar este archivo:
+#  1. Copia .env.multi-db.example como .env.multi-db
+#  2. Rellena las credenciales de cada BD en .env.multi-db
+#  3. Ejecuta:
+#       docker-compose -f docker-compose.multi-db.yml --env-file .env.multi-db up -d --build
+#
+#  Cada BD quedará disponible en su propio puerto:
+#    BD clientes    → http://IP-SERVIDOR:8001/sse
+#    BD inventario  → http://IP-SERVIDOR:8002/sse
+#    BD facturacion → http://IP-SERVIDOR:8003/sse
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  #  Base de datos: CLIENTES
+  #  Acceso: solo lectura (producción)
+  # ----------------------------------------------------------
+  mcp-clientes:
+    build: .
+    container_name: mcp-clientes
+    restart: unless-stopped
+    ports:
+      - "${MCP_BASE_PORT:-8001}:8000"
+    environment:
+      DATABASE_URI: "postgresql://${DB_CLIENTES_USER}:${DB_CLIENTES_PASSWORD}@${DB_CLIENTES_HOST}:${DB_CLIENTES_PORT:-5432}/${DB_CLIENTES_NAME}"
+    command:
+      - "--transport=sse"
+      - "--access-mode=restricted"
+    healthcheck:
+      test:
+        [
+          "CMD", "python", "-c",
+          "import urllib.request, sys; r = urllib.request.urlopen('http://localhost:8000/health', timeout=5); sys.exit(0 if r.status == 200 else 1)"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ----------------------------------------------------------
+  #  Base de datos: INVENTARIO
+  #  Acceso: solo lectura (producción)
+  # ----------------------------------------------------------
+  mcp-inventario:
+    build: .
+    container_name: mcp-inventario
+    restart: unless-stopped
+    ports:
+      - "${MCP_INVENTARIO_PORT:-8002}:8000"
+    environment:
+      DATABASE_URI: "postgresql://${DB_INVENTARIO_USER}:${DB_INVENTARIO_PASSWORD}@${DB_INVENTARIO_HOST}:${DB_INVENTARIO_PORT:-5432}/${DB_INVENTARIO_NAME}"
+    command:
+      - "--transport=sse"
+      - "--access-mode=restricted"
+    healthcheck:
+      test:
+        [
+          "CMD", "python", "-c",
+          "import urllib.request, sys; r = urllib.request.urlopen('http://localhost:8000/health', timeout=5); sys.exit(0 if r.status == 200 else 1)"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ----------------------------------------------------------
+  #  Base de datos: FACTURACION
+  #  Acceso: lectura y escritura
+  # ----------------------------------------------------------
+  mcp-facturacion:
+    build: .
+    container_name: mcp-facturacion
+    restart: unless-stopped
+    ports:
+      - "${MCP_FACTURACION_PORT:-8003}:8000"
+    environment:
+      DATABASE_URI: "postgresql://${DB_FACTURACION_USER}:${DB_FACTURACION_PASSWORD}@${DB_FACTURACION_HOST}:${DB_FACTURACION_PORT:-5432}/${DB_FACTURACION_NAME}"
+    command:
+      - "--transport=sse"
+      - "--access-mode=unrestricted"
+    healthcheck:
+      test:
+        [
+          "CMD", "python", "-c",
+          "import urllib.request, sys; r = urllib.request.urlopen('http://localhost:8000/health', timeout=5); sys.exit(0 if r.status == 200 else 1)"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
